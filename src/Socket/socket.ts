@@ -676,76 +676,249 @@ export const makeSocket = (config: SocketConfig) => {
 		end(new Boom(msg || 'Intentional Logout', { statusCode: DisconnectReason.loggedOut }))
 	}
 
-	const requestPairingCode = async (phoneNumber: string, customPairingCode?: string): Promise<string> => {
-		const pairingCode = customPairingCode ?? bytesToCrockford(randomBytes(5))
+	const waitForStableConnection = async (timeoutMs: number = 30000): Promise<void> => {
+		logger.debug({}, '[PAIRING] Waiting for stable connection...')
 
-		if (customPairingCode && customPairingCode?.length !== 8) {
-			throw new Error('Custom pairing code must be exactly 8 chars')
-		}
+		return new Promise((resolve, reject) => {
+			const timeout = setTimeout(() => {
+				reject(new Error('Timeout waiting for stable connection'))
+			}, timeoutMs)
 
-		authState.creds.pairingCode = pairingCode
+			const checkConnection = () => {
+				const isStable = ws.isOpen &&
+					!ws.isClosing &&
+					!ws.isClosed &&
+					!ws.isConnecting
 
-		authState.creds.me = {
-			id: jidEncode(phoneNumber, 's.whatsapp.net'),
-			name: '~'
-		}
-		ev.emit('creds.update', authState.creds)
-		await sendNode({
-			tag: 'iq',
-			attrs: {
-				to: S_WHATSAPP_NET,
-				type: 'set',
-				id: generateMessageTag(),
-				xmlns: 'md'
-			},
-			content: [
-				{
-					tag: 'link_code_companion_reg',
-					attrs: {
-						jid: authState.creds.me.id,
-						stage: 'companion_hello',
+				logger.debug({
+					isOpen: ws.isOpen,
+					isClosing: ws.isClosing,
+					isClosed: ws.isClosed,
+					isConnecting: ws.isConnecting,
+					isStable
+				}, '[PAIRING] Connection stability check')
 
-						should_show_push_notification: 'true'
-					},
-					content: [
-						{
-							tag: 'link_code_pairing_wrapped_companion_ephemeral_pub',
-							attrs: {},
-							content: await generatePairingKey()
-						},
-						{
-							tag: 'companion_server_auth_key_pub',
-							attrs: {},
-							content: authState.creds.noiseKey.public
-						},
-						{
-							tag: 'companion_platform_id',
-							attrs: {},
-							content: getPlatformId(browser[1])
-						},
-						{
-							tag: 'companion_platform_display',
-							attrs: {},
-							content: `${browser[1]} (${browser[0]})`
-						},
-						{
-							tag: 'link_code_pairing_nonce',
-							attrs: {},
-							content: '0'
-						}
-					]
+				if (isStable) {
+					clearTimeout(timeout)
+					logger.info({}, '[PAIRING] Stable connection confirmed')
+					resolve()
+				} else {
+					// Check again in 500ms
+					setTimeout(checkConnection, 500)
 				}
-			]
+			}
+
+			// Start checking immediately
+			checkConnection()
 		})
-		return authState.creds.pairingCode
+	}
+
+	const requestPairingCode = async (phoneNumber: string, customPairingCode?: string): Promise<string> => {
+		logger.info({ phoneNumber, hasCustomCode: !!customPairingCode }, '[PAIRING] Starting pairing code request')
+
+		try {
+			// Wait for stable connection before proceeding
+			await waitForStableConnection()
+			logger.info({}, '[PAIRING] Connection stable, proceeding with pairing request')
+			const pairingCode = customPairingCode ?? bytesToCrockford(randomBytes(5))
+			logger.debug({ code: pairingCode, length: pairingCode.length }, '[PAIRING] Generated/received pairing code')
+
+			if (customPairingCode && customPairingCode?.length !== 8) {
+				logger.error({ code: customPairingCode, length: customPairingCode?.length }, '[PAIRING] Custom pairing code validation failed')
+				throw new Error('Custom pairing code must be exactly 8 chars')
+			}
+
+			// Store pairing code in credentials
+			authState.creds.pairingCode = pairingCode
+			logger.debug({}, '[PAIRING] Stored pairing code in credentials')
+
+			// Create user JID from phone number
+			const userJid = jidEncode(phoneNumber, 's.whatsapp.net')
+			authState.creds.me = {
+				id: userJid,
+				name: '~'
+			}
+			logger.info({ jid: userJid, phoneNumber }, '[PAIRING] Created user JID')
+
+			// Emit credentials update
+			ev.emit('creds.update', authState.creds)
+			logger.debug({}, '[PAIRING] Emitted creds.update event')
+
+			// Generate pairing key
+			logger.debug({}, '[PAIRING] Generating pairing key...')
+			const pairingKey = await generatePairingKey()
+			logger.debug({ keyLength: pairingKey.length }, '[PAIRING] Pairing key generated')
+
+			// Get platform information
+			const platformId = getPlatformId(browser[1])
+			const platformDisplay = `${browser[1]} (${browser[0]})`
+			logger.debug({ platformId, platformDisplay, browser }, '[PAIRING] Platform info')
+
+			// Prepare the pairing registration node
+			const messageId = generateMessageTag()
+			logger.debug({ messageId }, '[PAIRING] Preparing link_code_companion_reg node')
+
+			const pairingNode = {
+				tag: 'iq',
+				attrs: {
+					to: S_WHATSAPP_NET,
+					type: 'set',
+					id: messageId,
+					xmlns: 'md'
+				},
+				content: [
+					{
+						tag: 'link_code_companion_reg',
+						attrs: {
+							jid: authState.creds.me.id,
+							stage: 'companion_hello',
+							should_show_push_notification: 'true'
+						},
+						content: [
+							{
+								tag: 'link_code_pairing_wrapped_companion_ephemeral_pub',
+								attrs: {},
+								content: pairingKey
+							},
+							{
+								tag: 'companion_server_auth_key_pub',
+								attrs: {},
+								content: authState.creds.noiseKey.public
+							},
+							{
+								tag: 'companion_platform_id',
+								attrs: {},
+								content: platformId
+							},
+							{
+								tag: 'companion_platform_display',
+								attrs: {},
+								content: platformDisplay
+							},
+							{
+								tag: 'link_code_pairing_nonce',
+								attrs: {},
+								content: '0'
+							}
+						]
+					}
+				]
+			}
+
+			logger.info({}, '[PAIRING] Sending pairing registration node to WhatsApp servers')
+
+			// Send the pairing node with retry logic
+			const startTime = Date.now()
+			const maxRetries = 3
+			let lastError: Error | null = null
+
+			for (let attempt = 1; attempt <= maxRetries; attempt++) {
+				try {
+					logger.debug({ attempt, maxRetries }, '[PAIRING] Sending pairing node attempt')
+
+					// Check connection stability before each attempt
+					await waitForStableConnection(5000) // Shorter timeout for retries
+
+					await sendNode(pairingNode)
+					const responseTime = Date.now() - startTime
+
+					logger.info({
+						responseTime: `${responseTime}ms`,
+						attempt
+					}, '[PAIRING] Pairing registration sent successfully')
+
+					lastError = null
+					break // Success, exit retry loop
+
+				} catch (error: any) {
+					lastError = error
+					logger.warn({
+						attempt,
+						maxRetries,
+						error: error.message,
+						willRetry: attempt < maxRetries
+					}, '[PAIRING] Pairing node send failed')
+
+					if (attempt < maxRetries) {
+						const delay = Math.pow(2, attempt - 1) * 1000 // Exponential backoff: 1s, 2s, 4s
+						logger.debug({ delay }, '[PAIRING] Waiting before retry')
+						await new Promise(resolve => setTimeout(resolve, delay))
+					}
+				}
+			}
+
+			if (lastError) {
+				logger.error({
+					error: lastError.message,
+					attempts: maxRetries
+				}, '[PAIRING] All pairing send attempts failed')
+				throw lastError
+			}
+
+			logger.info({
+				code: authState.creds.pairingCode,
+				jid: authState.creds.me.id,
+				totalTime: `${Date.now() - startTime}ms`
+			}, '[PAIRING] Pairing code request completed successfully')
+
+			return authState.creds.pairingCode
+
+		} catch (error: any) {
+			logger.error({
+				error: error.message,
+				stack: error.stack,
+				phoneNumber
+			}, '[PAIRING] Pairing code request failed')
+			throw error
+		}
 	}
 
 	async function generatePairingKey() {
-		const salt = randomBytes(32)
-		const randomIv = randomBytes(16)
-		const key = await derivePairingCodeKey(authState.creds.pairingCode!, salt)
-		const ciphered = aesEncryptCTR(authState.creds.pairingEphemeralKeyPair.public, key, randomIv)
-		return Buffer.concat([salt, randomIv, ciphered])
+		try {
+			logger.debug({}, '[PAIRING] Generating pairing key components')
+
+			const salt = randomBytes(32)
+			logger.debug({ saltLength: salt.length }, '[PAIRING] Generated salt')
+
+			const randomIv = randomBytes(16)
+			logger.debug({ ivLength: randomIv.length }, '[PAIRING] Generated random IV')
+
+			if (!authState.creds.pairingCode) {
+				throw new Error('Pairing code not found in credentials')
+			}
+
+			logger.debug({ pairingCode: authState.creds.pairingCode }, '[PAIRING] Deriving pairing code key')
+			const key = await derivePairingCodeKey(authState.creds.pairingCode, salt)
+			logger.debug({ keyLength: key.length }, '[PAIRING] Pairing code key derived')
+
+			if (!authState.creds.pairingEphemeralKeyPair?.public) {
+				throw new Error('Pairing ephemeral key pair public key not found')
+			}
+
+			logger.debug({
+				publicKeyLength: authState.creds.pairingEphemeralKeyPair.public.length
+			}, '[PAIRING] Encrypting ephemeral public key')
+
+			const ciphered = aesEncryptCTR(authState.creds.pairingEphemeralKeyPair.public, key, randomIv)
+			logger.debug({ cipheredLength: ciphered.length }, '[PAIRING] Ephemeral key encrypted')
+
+			const finalKey = Buffer.concat([salt, randomIv, ciphered])
+			logger.debug({
+				totalLength: finalKey.length,
+				components: { saltLength: salt.length, ivLength: randomIv.length, cipheredLength: ciphered.length }
+			}, '[PAIRING] Final pairing key assembled')
+
+			return finalKey
+
+		} catch (error: any) {
+			logger.error({
+				error: error.message,
+				stack: error.stack,
+				hasPairingCode: !!authState.creds.pairingCode,
+				hasEphemeralKeyPair: !!authState.creds.pairingEphemeralKeyPair
+			}, '[PAIRING] Failed to generate pairing key')
+			throw error
+		}
 	}
 
 	const sendWAMBuffer = (wamBuffer: Buffer) => {
