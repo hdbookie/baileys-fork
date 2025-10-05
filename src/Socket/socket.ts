@@ -677,13 +677,11 @@ export const makeSocket = (config: SocketConfig) => {
 	}
 
 	const waitForStableConnection = async (timeoutMs: number = 30000): Promise<void> => {
-		console.log('[FORK] ⏳ waitForStableConnection starting...')
 		logger.debug({}, '[PAIRING] Waiting for stable connection...')
 
 		return new Promise((resolve, reject) => {
 			const startTime = Date.now()
 			const timeout = setTimeout(() => {
-				console.log('[FORK] ❌ Timeout waiting for stable connection after', timeoutMs, 'ms')
 				reject(new Error('Timeout waiting for stable connection'))
 			}, timeoutMs)
 
@@ -692,15 +690,6 @@ export const makeSocket = (config: SocketConfig) => {
 					!ws.isClosing &&
 					!ws.isClosed &&
 					!ws.isConnecting
-
-				const elapsed = Date.now() - startTime
-				console.log(`[FORK] 🔍 Stability check (${elapsed}ms):`, {
-					isOpen: ws.isOpen,
-					isClosing: ws.isClosing,
-					isClosed: ws.isClosed,
-					isConnecting: ws.isConnecting,
-					isStable
-				})
 
 				logger.debug({
 					isOpen: ws.isOpen,
@@ -712,7 +701,6 @@ export const makeSocket = (config: SocketConfig) => {
 
 				if (isStable) {
 					clearTimeout(timeout)
-					console.log('[FORK] ✅ Stable connection confirmed after', elapsed, 'ms')
 					logger.info({}, '[PAIRING] Stable connection confirmed')
 					resolve()
 				} else {
@@ -727,14 +715,11 @@ export const makeSocket = (config: SocketConfig) => {
 	}
 
 	const requestPairingCode = async (phoneNumber: string, customPairingCode?: string): Promise<string> => {
-		console.log('[FORK] 🔢 requestPairingCode called with phone:', phoneNumber)
 		logger.info({ phoneNumber, hasCustomCode: !!customPairingCode }, '[PAIRING] Starting pairing code request')
 
 		try {
-			console.log('[FORK] ⏳ Waiting for stable connection...')
 			// Wait for stable connection before proceeding
 			await waitForStableConnection()
-			console.log('[FORK] ✅ Connection stable!')
 			logger.info({}, '[PAIRING] Connection stable, proceeding with pairing request')
 			const pairingCode = customPairingCode ?? bytesToCrockford(randomBytes(5))
 			logger.debug({ code: pairingCode, length: pairingCode.length }, '[PAIRING] Generated/received pairing code')
