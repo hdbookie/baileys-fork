@@ -54,7 +54,9 @@ export async function connectWithPairingCode(config: ConnectionConfig): Promise<
 
 	// Handle connection updates
 	sock.ev.on('connection.update', async (update) => {
-		const { connection, lastDisconnect } = update
+		const { connection, lastDisconnect, qr } = update
+
+		console.log('Connection update:', { connection, statusCode: (lastDisconnect?.error as Boom)?.output?.statusCode, registered: sock.authState.creds.registered })
 
 		if (connection === 'close') {
 			const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode
@@ -109,33 +111,31 @@ export async function connectWithPairingCode(config: ConnectionConfig): Promise<
 }
 
 // Example usage
-if (require.main === module) {
-	const phoneNumber = process.argv[2]
+const phoneNumber = process.argv[2]
 
-	if (!phoneNumber) {
-		console.error('Usage: tsx pairing-example.ts <phone-number>')
-		console.error('Example: tsx pairing-example.ts 5521989974782')
-		process.exit(1)
-	}
-
-	connectWithPairingCode({
-		phoneNumber,
-		authDir: 'baileys_auth_info',
-		onPairingCode: (code) => {
-			console.log('Pairing code callback:', code)
-			// Send this code to your user via your app's UI
-		},
-		onConnected: (sock) => {
-			console.log('Connected! User:', sock.user?.id)
-			// Initialize your app logic here
-		},
-		onDisconnected: (reason) => {
-			console.log('Disconnected:', reason)
-			// Handle disconnection in your app
-		},
-		onMessage: (message) => {
-			console.log('New message:', message)
-			// Handle incoming messages
-		}
-	}).catch(console.error)
+if (!phoneNumber) {
+	console.error('Usage: tsx pairing-example.ts <phone-number>')
+	console.error('Example: tsx pairing-example.ts 5521989974782')
+	process.exit(1)
 }
+
+connectWithPairingCode({
+	phoneNumber,
+	authDir: 'baileys_auth_info',
+	onPairingCode: (code) => {
+		console.log('Pairing code callback:', code)
+		// Send this code to your user via your app's UI
+	},
+	onConnected: (sock) => {
+		console.log('Connected! User:', sock.user?.id)
+		// Initialize your app logic here
+	},
+	onDisconnected: (reason) => {
+		console.log('Disconnected:', reason)
+		// Handle disconnection in your app
+	},
+	onMessage: (message) => {
+		console.log('New message:', message)
+		// Handle incoming messages
+	}
+}).catch(console.error)
